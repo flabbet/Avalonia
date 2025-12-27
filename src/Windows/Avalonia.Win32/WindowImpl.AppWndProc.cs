@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -12,6 +13,7 @@ using Avalonia.Threading;
 using Avalonia.Win32.Automation;
 using Avalonia.Win32.Automation.Interop;
 using Avalonia.Win32.Input;
+using Avalonia.Win32.WintabImpl;
 using static Avalonia.Win32.Interop.UnmanagedMethods;
 
 namespace Avalonia.Win32
@@ -19,6 +21,13 @@ namespace Avalonia.Win32
     internal partial class WindowImpl
     {
         private bool _killFocusRequested;
+
+        private WintabContext _hCtx;
+        private WintabData _wnData;
+        private bool wasTipDown;
+        private bool wasBarrelDown;
+        private uint _lastWintabTime;
+        private double maxPressure = WintabInfo.GetMaxPressure();
 
         [SuppressMessage("Microsoft.StyleCop.CSharp.NamingRules", "SA1305:FieldNamesMustNotUseHungarianNotation",
             Justification = "Using Win32 naming for consistency.")]
@@ -32,8 +41,30 @@ namespace Avalonia.Win32
             RawInputEventArgs? e = null;
             var shouldTakeFocus = false;
             var message = (WindowsMessage)msg;
+
             switch (message)
             {
+                case (WindowsMessage)(int)EWintabEventMessage.WT_PACKET:
+                {
+                    // lParam is the HCTX (Wintab Context Handle)
+                    // wParam is the serial number of the packet
+                    uint pktId = (uint)ToInt32(wParam);
+                    WintabPacket packet = _wnData.GetDataPacket(_hCtx.HCtx, pktId);
+                    if (packet.pkContext != 0)
+                    {
+                        var raw = CreateRawPointerPoint(packet);
+                        var args = CreatePointerArgs(_penDevice, packet.pkTime, GetEventType(packet),
+                            raw, GetInputModifiers(packet), packet.pkCursor);
+
+                        //args.IntermediatePoints = CreateLazyIntermediatePoints();
+
+                        e = args;
+
+                        _lastWintabTime = packet.pkTime;
+                    }
+
+                    break;
+                }
                 case WindowsMessage.WM_ACTIVATE:
                     {
                         var wa = (WindowActivate)(ToInt32(wParam) & 0xffff);
@@ -45,12 +76,16 @@ namespace Avalonia.Win32
                                 {
                                     Activated?.Invoke();
                                     UpdateInputMethod(GetKeyboardLayout(0));
+                                    WintabFuncs.WTEnable(_hCtx.HCtx, true);
+                                    WintabFuncs.WTOverlap(_hCtx.HCtx, true);
                                     break;
                                 }
 
                             case WindowActivate.WA_INACTIVE:
                                 {
                                     Deactivated?.Invoke();
+                                    WintabFuncs.WTEnable(_hCtx.HCtx, false);
+                                    WintabFuncs.WTOverlap(_hCtx.HCtx, false);
                                     break;
                                 }
                         }
@@ -289,6 +324,8 @@ namespace Avalonia.Win32
                         {
                             break;
                         }
+                        if (timestamp - _lastWintabTime < 50) break;
+
                         shouldTakeFocus = ShouldTakeFocusOnClick;
                         if (ShouldIgnoreTouchEmulatedMessage())
                         {
@@ -355,6 +392,9 @@ namespace Avalonia.Win32
                         {
                             break;
                         }
+
+                        if (timestamp - _lastWintabTime < 50) break;
+
                         if (ShouldIgnoreTouchEmulatedMessage())
                         {
                             break;
@@ -1001,6 +1041,36 @@ namespace Avalonia.Win32
             return DefWindowProc(hWnd, msg, wParam, lParam);
         }
 
+        private RawInputModifiers GetInputModifiers(WintabPacket packet)
+        {
+            bool barrelDown = (packet.pkButtons & 0x002) != 0;
+            var modifiers = WindowsKeyboardDevice.Instance.Modifiers;
+            if (barrelDown)
+            {
+                modifiers |= RawInputModifiers.PenBarrelButton;
+            }
+
+            bool isEraser = packet.pkCursor == 2;
+
+            if(isEraser)
+            {
+                modifiers |= RawInputModifiers.PenEraser;
+            }
+
+            bool isInverted = (packet.pkStatus & (uint)EWintabPacketStatusValue.TPS_INVERT) != 0;
+            if (isInverted)
+            {
+                modifiers |= RawInputModifiers.PenInverted;
+            }
+
+            if(packet.pkNormalPressure > 0)
+            {
+                modifiers |= RawInputModifiers.LeftMouseButton;
+            }
+
+            return modifiers;
+        }
+
         internal bool IsOurWindow(IntPtr hwnd)
         {
             if (hwnd == IntPtr.Zero)
@@ -1146,6 +1216,14 @@ namespace Avalonia.Win32
 
         }
 
+        public Point MapWintabToClientLocation(int pkX, int pkY)
+        {
+            int screenHeight = GetSystemMetrics(SystemMetric.SM_CYVIRTUALSCREEN);
+            int screenTop = GetSystemMetrics(SystemMetric.SM_YVIRTUALSCREEN);
+            int invertedY = screenHeight + screenTop - pkY;
+            return PointToClient(new Point(pkX, invertedY));
+        }
+
         private RawPointerEventArgs CreatePointerArgs(IInputDevice device, ulong timestamp, RawPointerEventType eventType, RawPointerPoint point, RawInputModifiers modifiers, uint rawPointerId)
         {
             return device is TouchDevice
@@ -1261,6 +1339,54 @@ namespace Avalonia.Win32
                 Twist = info.rotation,
                 XTilt = info.tiltX,
                 YTilt = info.tiltY
+            };
+        }
+
+        private RawPointerEventType GetEventType(WintabPacket packet)
+        {
+            bool isTipDown = packet.pkNormalPressure > 0;
+            bool isBarrelDown = (packet.pkButtons & (uint)EWintabPacketButtonCode.TBN_DOWN) != 0;
+
+            RawPointerEventType eventType;
+
+            if (isTipDown && !wasTipDown)
+            {
+                eventType = RawPointerEventType.LeftButtonDown;
+            }
+            else if (!isTipDown && wasTipDown)
+            {
+                eventType = RawPointerEventType.LeftButtonUp;
+            }
+            else if (isBarrelDown && !wasBarrelDown)
+            {
+                eventType = RawPointerEventType.RightButtonDown;
+            }
+            else if (!isBarrelDown && wasBarrelDown)
+            {
+                eventType = RawPointerEventType.RightButtonUp;
+            }
+            else
+            {
+                eventType = RawPointerEventType.Move;
+            }
+
+            wasTipDown = isTipDown;
+            wasBarrelDown = isBarrelDown;
+
+            return eventType;
+        }
+
+        private RawPointerPoint CreateRawPointerPoint(WintabPacket packet)
+        {
+            var point = MapWintabToClientLocation(packet.pkX, packet.pkY);
+
+            return new RawPointerPoint
+            {
+                Position = point,
+                Pressure = packet.pkNormalPressure / (float)maxPressure,
+                XTilt = packet.pkOrientation.orAzimuth,
+                YTilt = packet.pkOrientation.orAltitude,
+                Twist = packet.pkOrientation.orTwist
             };
         }
 

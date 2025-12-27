@@ -27,6 +27,7 @@ using Avalonia.Platform.Storage.FileIO;
 using Avalonia.Threading;
 using static Avalonia.Controls.Win32Properties;
 using Avalonia.Logging;
+using Avalonia.Win32.WintabImpl;
 
 namespace Avalonia.Win32
 {
@@ -181,8 +182,32 @@ namespace Avalonia.Win32
             _defaultTransparencyLevel = UseRedirectionBitmap ? WindowTransparencyLevel.None : WindowTransparencyLevel.Transparent;
             _transparencyLevel = _defaultTransparencyLevel;
 
+            _hCtx = WintabContext.GetDefaultContext(EWTICategoryIndex.WTI_DEFSYSCTX);
+            _hCtx.Options |= (uint)ECTXOptionValues.CXO_SYSTEM | (uint)ECTXOptionValues.CXO_MESSAGES;
+            _hCtx.PktMode = 0;
+            _hCtx.SysMode = false;
+            _hCtx.Open(_hwnd);
+            _wnData = new WintabData(_hCtx);
+            if (!_wnData.SetPacketQueueSize(128))
+            {
+                _wnData.SetPacketQueueSize(32);
+            }
+
             lock (s_instances)
                 s_instances.Add(this);
+        }
+
+        private bool ShouldUseWindowsInk()
+        {
+            bool isInkSupported = Environment.OSVersion.Platform == PlatformID.Win32NT &&
+                                  Environment.OSVersion.Version >= new Version(6, 2);
+
+            if(!isInkSupported)
+                return false;
+
+            int digitizerStatus = GetSystemMetrics(SystemMetric.SM_DIGITIZER);
+            const int NID_READY = 0x80;
+            return (digitizerStatus & NID_READY) != 0;
         }
 
         internal IInputRoot Owner
@@ -528,7 +553,7 @@ namespace Avalonia.Win32
                     0,
                     0,
                     SetWindowPosFlags.SWP_NOSIZE | SetWindowPosFlags.SWP_NOACTIVATE | SetWindowPosFlags.SWP_NOZORDER);
-                
+
                 if (ShCoreAvailable && Win32Platform.WindowsVersion >= PlatformConstants.Windows8_1)
                 {
                     var monitor = MonitorFromWindow(Handle.Handle, MONITOR.MONITOR_DEFAULTTONEAREST);
@@ -804,7 +829,7 @@ namespace Avalonia.Win32
             var hCursor = impl?.Handle ?? s_defaultCursor;
             SetClassLong(_hwnd, ClassLongIndex.GCLP_HCURSOR, hCursor);
 
-            UnmanagedMethods.SetCursor(hCursor);    
+            UnmanagedMethods.SetCursor(hCursor);
         }
 
         public void SetIcon(IWindowIconImpl? icon)

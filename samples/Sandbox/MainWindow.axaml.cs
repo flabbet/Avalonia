@@ -1,6 +1,7 @@
 using Avalonia;
 using Avalonia.Controls;
 using Avalonia.Controls.Presenters;
+using Avalonia.Input;
 using Avalonia.Input.TextInput;
 using Avalonia.Markup.Xaml;
 using Avalonia.Win32.WinRT.Composition;
@@ -12,6 +13,11 @@ namespace Sandbox
         public MainWindow()
         {
             InitializeComponent();
+        }
+
+        protected override void OnPointerMoved(PointerEventArgs e)
+        {
+            Pos.Text = $"Pointer Moved: {e.GetPosition(null)}";
         }
     }
 }
